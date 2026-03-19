@@ -1,0 +1,23 @@
+{
+  "model": {
+    "vocab_size": 10000,
+    "context_length": 256,
+    "d_model": 768,
+    "num_layers": 12,
+    "num_heads": 12,
+    "d_ff": 3042,
+    "rope_theta" : 10000
+  },
+  "optimizer": {
+    "lr": 0.001,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps"  : 1e-8,
+    "weight_decay": 0.01
+  },
+  "training": {
+    "batch_size": 4,
+    "max_norm": 1.0,
+    "precision": "fp32"
+  }
+}
