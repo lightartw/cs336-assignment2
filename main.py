@@ -1,13 +1,14 @@
 import os
 import logging
-from typing import List
-
+from typing import Dict, List, Tuple
+import re
+import glob
 import torch 
 import typer
 import json
 import pandas as pd
 
-from cs336_systems.benchmarking import ModelBenchmarker
+from cs336_systems.benchmark import ModelBenchmarker
 from cs336_systems.config import Config
 
 app = typer.Typer(help="CS336 Benchmarking", add_completion=False)
@@ -27,15 +28,16 @@ MODEL_SPECS = {
 
 @app.command()
 def sweep(
-    model_sizes: List[str] = typer.Option(["small", "medium", "large"], help="--model-sizes small --model-sizes medium"),
-    context_lengths: List[int] = typer.Option([128, 256], help="上下文长度列表"),
+    model_sizes: List[str] = typer.Option(["small"], help="--model-sizes small --model-sizes medium"),
+    context_lengths: List[int] = typer.Option([128], help="上下文长度列表"),
     config_path: str = typer.Option("./cs336_systems/model_config.json", help="配置文件路径"),
     vocab_size: int = typer.Option(10000, help="always 10,000"),
     batch_size: int = typer.Option(4, help="always 4"),
     precision: str = typer.Option("fp32", help=" fp32, fp16, bf16"),
-    only_forward: bool = typer.Option("True"),
+    only_forward: bool = typer.Option("False"),
     num_warmups: int = typer.Option(5, help="预热步数"),
     num_trials: int = typer.Option(10, help="测量步数"),
+    use_nvtx: bool = typer.Option(False, help="是否使用nsys")
 ):
     if not os.path.exists(config_path):
         logger.error(f"can't find config: {config_path}")
@@ -44,7 +46,7 @@ def sweep(
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
 
-    logger.info(f"🚀 Start Benchmarking Sweep | 精度: {precision}")
+    logger.info(f"🚀 Start Benchmarking Sweep | Precision: {precision}")
     results =[]
 
     for size_name in model_sizes:
@@ -80,9 +82,14 @@ def sweep(
                 config_obj = Config.model_validate(config_dict)
                 benchmarker = ModelBenchmarker(config_obj)
                 
-                mean, std = benchmarker.benchmark_step(
-                        only_forward=only_forward, num_warmups=num_warmups, num_trials=num_trials
+                res = benchmarker.benchmark_step(
+                    only_forward=only_forward, 
+                    num_warmups=num_warmups, 
+                    num_trials=num_trials,
+                    use_nvtx=use_nvtx
                 )
+                mean, std = res['step']
+
                 res_entry["Time (ms)"] = f"{mean:.2f} ± {std:.2f}"
                 res_entry["Time (ms)"] = f"{mean:.2f} ± {std:.2f}"
                 results.append(res_entry)
@@ -108,7 +115,75 @@ def sweep(
     print("="*60 + "\n")
     
     print(df.to_markdown(index=False))
-    print("\n" + "="*60 + "\n")
+
+@app.command()
+def report(
+    csv_dir: str = typer.Option("./result/csv", help="nsys 导出的 CSV 文件所在目录")
+):
+    registry = {
+        "Forward": ":forward",
+        "Backward": ":backward",
+        "Optimizer": ":optimizer_step"
+    }
+
+    raw_storage: Dict[Tuple[str, int], Dict[str, Tuple[float, float]]] = {}
+    
+    pattern = os.path.join(csv_dir, "profile_*_ctx*_nvtx_sum.csv")
+    csv_files = glob.glob(pattern)
+    if not csv_files:
+        logger.error(f"在 {csv_dir} 中未找到匹配的 CSV 文件。")
+        raise typer.Exit(code=1)
+
+    for file_path in csv_files:
+        filename = os.path.basename(file_path)
+        match = re.search(r"profile_(.*)_ctx(\d+)_nvtx_sum", filename)
+        if not match: continue
+        model_size, ctx_len = match.group(1), int(match.group(2))
+        
+        key = (model_size, ctx_len)
+        if key not in raw_storage: raw_storage[key] = {}
+
+        try:
+            df = pd.read_csv(file_path)
+            col = 'Name' if 'Name' in df.columns else 'Range'
+            
+            for title, label in registry.items():
+                row = df[df[col].str.contains(label, na=False)]
+                if not row.empty:
+                    raw_storage[key][title] = (row['Avg (ns)'].values[0] / 1e6, 
+                                               row['StdDev (ns)'].values[0] / 1e6)
+        except Exception as e:
+            logger.error(f"解析 {filename} 失败: {e}")
+
+    size_order = {"small": 0, "medium": 1, "large": 2}
+    def print_formatted_table(title: str, data_list: List[dict]):
+        if not data_list: return
+        df_res = pd.DataFrame(data_list)
+        df_res['order'] = df_res['Model Size'].map(lambda x: size_order.get(x, 99))
+        df_res = df_res.sort_values(by=['order', 'Context Length']).drop(columns=['order'])
+        print(f"\n {title} Pass")
+        print(df_res.to_markdown(index=False))
+
+    for title in registry.keys():
+        table_rows = []
+        for (size, ctx), metrics in raw_storage.items():
+            res = metrics.get(title)
+            val = f"{res[0]:.2f} ± {res[1]:.2f}" if res else "N/A"
+            table_rows.append({"Model Size": size, "Context Length": ctx, "Time (ms)": val})
+        print_formatted_table(title, table_rows)
+
+    total_rows = []
+    for (size, ctx), metrics in raw_storage.items():
+        if all(t in metrics for t in registry.keys()):
+            t_med = sum(m[0] for m in metrics.values())
+            t_std = sum(m[1]**2 for m in metrics.values())**0.5 
+            val = f"{t_med:.2f} ± {t_std:.2f}"
+        else:
+            val = "OOM / Incomplete"
+        total_rows.append({"Model Size": size, "Context Length": ctx, "Time (ms)": val})
+    
+    print_formatted_table("Total Step (F+B+O)", total_rows)
+
 
 
 if __name__ == "__main__":

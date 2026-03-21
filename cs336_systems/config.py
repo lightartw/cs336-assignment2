@@ -9,21 +9,13 @@ class ModelConfig(BaseModel):
     d_ff: int
     rope_theta: float
 
-class OptimizerConfig(BaseModel):
-    lr: float
-    beta1: float
-    beta2: float
-    weight_decay: float
-    eps: float
-
 class TrainingConfig(BaseModel):
     batch_size: int
-    max_norm: float    # gradient_clipping 需要的阈值
     precision: str
+    device: str = "cuda"
 
 class Config(BaseModel):
     model: ModelConfig
-    optimizer: OptimizerConfig
     training: TrainingConfig
 
     @classmethod

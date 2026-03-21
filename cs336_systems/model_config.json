@@ -8,16 +8,9 @@
     "d_ff": 3042,
     "rope_theta" : 10000
   },
-  "optimizer": {
-    "lr": 0.001,
-    "beta1": 0.9,
-    "beta2": 0.999,
-    "eps"  : 1e-8,
-    "weight_decay": 0.01
-  },
   "training": {
     "batch_size": 4,
-    "max_norm": 1.0,
-    "precision": "fp32"
+    "precision": "fp32",
+    "device": "cuda"
   }
 }
