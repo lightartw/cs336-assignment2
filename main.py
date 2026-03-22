@@ -28,17 +28,20 @@ MODEL_SPECS = {
 
 @app.command()
 def sweep(
-    model_sizes: List[str] = typer.Option(["small"], help="--model-sizes small --model-sizes medium"),
-    context_lengths: List[int] = typer.Option([128], help="上下文长度列表"),
+    model_sizes: List[str] = typer.Option(["small", "medium"], help="--model-sizes small --model-sizes medium"),
+    context_lengths: List[int] = typer.Option([128, 256], help="上下文长度列表"),
     config_path: str = typer.Option("./cs336_systems/model_config.json", help="配置文件路径"),
-    vocab_size: int = typer.Option(10000, help="always 10,000"),
-    batch_size: int = typer.Option(4, help="always 4"),
-    precision: str = typer.Option("fp32", help=" fp32, fp16, bf16"),
-    only_forward: bool = typer.Option("False"),
+    precision: str = typer.Option("bf16", help=" fp32, fp16, bf16"),
+    only_forward: bool = typer.Option(False),
     num_warmups: int = typer.Option(5, help="预热步数"),
     num_trials: int = typer.Option(10, help="测量步数"),
-    use_nvtx: bool = typer.Option(False, help="是否使用nsys")
+    use_nvtx: bool = typer.Option(False, help="是否使用nsys"),
+    profile_mem: bool = typer.Option(False),
+    use_compile: bool = typer.Option(False),
 ):
+    batch_size = 4
+    vocab_size = 10000
+
     if not os.path.exists(config_path):
         logger.error(f"can't find config: {config_path}")
         raise typer.Exit(code=1)
@@ -46,6 +49,9 @@ def sweep(
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
 
+    if use_compile:
+        config_dict['training']['is_compile'] = True
+    
     logger.info(f"🚀 Start Benchmarking Sweep | Precision: {precision}")
     results =[]
 
@@ -86,7 +92,8 @@ def sweep(
                     only_forward=only_forward, 
                     num_warmups=num_warmups, 
                     num_trials=num_trials,
-                    use_nvtx=use_nvtx
+                    use_nvtx=use_nvtx,
+                    profile_memory=profile_mem
                 )
                 mean, std = res['step']
 
@@ -113,7 +120,6 @@ def sweep(
     print("\n" + "="*60)
     print(f" 📊 Benchmark Results | Precision: {precision} | Batch: {batch_size}")
     print("="*60 + "\n")
-    
     print(df.to_markdown(index=False))
 
 @app.command()
@@ -183,6 +189,88 @@ def report(
         total_rows.append({"Model Size": size, "Context Length": ctx, "Time (ms)": val})
     
     print_formatted_table("Total Step (F+B+O)", total_rows)
+
+@app.command()
+def bench_atten(
+    config_path: str = typer.Option("./cs336_systems/model_config.json", help="配置文件路径"),
+    num_warmups: int = 10,
+    num_trials: int = 100,
+    is_compile: bool = typer.Option(False, "--is-compile", help="是否使用 torch.compile"),
+):
+    import itertools
+    from cs336_systems.benchmark import AttentionBenchmarker
+    from cs336_basics.model import scaled_dot_product_attention
+
+    atten_fn = scaled_dot_product_attention
+    if is_compile:
+        logger.info("Using torch.compile")
+        torch.set_float32_matmul_precision('high')
+        atten_fn = torch.compile(scaled_dot_product_attention)
+
+    batch_size = 8
+    dmodels =[16, 32, 64, 128]
+    seq_lens =[256, 1024, 4096]
+
+    benchmarker = AttentionBenchmarker(config_path)
+
+    results_list = []
+    for dmodel, seq_len in itertools.product(dmodels, seq_lens):
+        logger.info(f"\nBenchmarking dmodel={dmodel}, seq_len={seq_len}")
+        res_entry = {
+            "d_model": dmodel,
+            "seq_len": seq_len,
+            "Forward (ms)": "N/A",
+            "Backward (ms)": "N/A",
+            "Memory (GB)": "N/A"
+        }   
+
+        try:
+            shape = (batch_size, seq_len, dmodel)
+            Q = torch.randn(*shape, device="cuda", requires_grad=True)
+            K = torch.randn(*shape, device="cuda", requires_grad=True)
+            V = torch.randn(*shape, device="cuda", requires_grad=True)
+            #mask = torch.tril(torch.ones(seq_len, seq_len, device="cuda")).bool()
+            mask = None 
+
+            res = benchmarker.benchmark_attention_step(
+                atten_fn,
+                Q, K, V, mask, 
+                num_warmups=num_warmups, num_trials=num_trials
+            )
+            
+            if res.get("oom", False):
+                error_msg = "OOM"
+                res_entry["Forward (ms)"] = error_msg
+                res_entry["Backward (ms)"] = error_msg
+                res_entry["Memory (GB)"] = error_msg
+            else:
+                res_entry["Forward (ms)"] = f"{res['forward_mean_ms']:.2f} ± {res['forward_std_ms']:.2f}"
+                res_entry["Backward (ms)"] = f"{res['backward_mean_ms']:.2f} ± {res['backward_std_ms']:.2f}"
+                res_entry["Memory (GB)"] = f"{res['memory_gb']:.4f} ± {res['memory_std']:.4f}"
+            
+            del Q, K, V, mask
+            
+        except Exception as e:
+            error_msg = "Error"
+            if "out of memory" in str(e).lower():
+                error_msg = "OOM"
+            logger.error(f"Failed at d={dmodel}, l={seq_len}: {e}")
+            res_entry["Forward (ms)"] = error_msg
+            res_entry["Backward (ms)"] = error_msg
+            res_entry["Memory (GB)"] = error_msg
+        finally:
+            results_list.append(res_entry)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    df = pd.DataFrame(results_list)
+    
+    print("\n" + "="*80)
+    print(f" 📊 Attention Benchmark Results (Naïve Implementation) | Batch Size: {batch_size}")
+    print("="*80 + "\n")
+    
+    print(df.to_markdown(index=False))
+    print("\n" + "="*80)
 
 
 

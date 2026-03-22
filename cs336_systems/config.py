@@ -13,6 +13,7 @@ class TrainingConfig(BaseModel):
     batch_size: int
     precision: str
     device: str = "cuda"
+    is_compile: bool = False
 
 class Config(BaseModel):
     model: ModelConfig

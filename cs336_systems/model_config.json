@@ -11,6 +11,7 @@
   "training": {
     "batch_size": 4,
     "precision": "fp32",
-    "device": "cuda"
+    "device": "cuda",
+    "is_compile" : false
   }
 }
