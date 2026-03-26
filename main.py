@@ -272,7 +272,81 @@ def bench_atten(
     print(df.to_markdown(index=False))
     print("\n" + "="*80)
 
+@app.command()
+def bench_flash(
+    warmups: int=25,
+    trails: int=100,
+    use_flash: bool = typer.Option(True, help="是否使用flash"),
+    precision: str = typer.Option("bf16", help="fp32, bf16") 
+):
+    import itertools
+    from cs336_systems.benchmark_atten import benchmark_flash
+    from cs336_basics.model import scaled_dot_product_attention
+    from cs336_systems.flashattention import FlashAttention2Triton
 
+    atten_fn = scaled_dot_product_attention
+    if use_flash:
+        atten_fn = FlashAttention2Triton.apply
+    else:
+        def baseline_wrapper(q, k, v, is_causal=True):
+            seq_len = q.shape[-2]
+            if is_causal:
+                mask = torch.tril(torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool))
+            else:
+                mask = None
+            return scaled_dot_product_attention(q, k, v, mask)
+        atten_fn = baseline_wrapper
+
+    dtype_map = {"bf16": torch.bfloat16, "fp32": torch.float32}
+    dtype = dtype_map.get(precision, torch.bfloat16)
+    n_heads = 16
+    dmodels = [16, 32, 64, 128]
+    #seq_lens = [128, 256, 512, 1024, 2048, 4096]
+    seq_lens = [8192]
+
+    logger.info(f"dtype: {dtype}")
+    results_list = []
+    for dmodel, seq_len in itertools.product(dmodels, seq_lens):
+        logger.info(f"Benchmarking dmodel={dmodel}, seq_len={seq_len}")
+        res_entry = {
+            "d_model": dmodel,
+            "seq_len": seq_len,
+            "Forward (ms)": "N/A",
+            "Backward (ms)": "N/A",
+            "End-to-End (ms)": "N/A"
+        }   
+
+        try:
+            fwd_ms, bwd_ms, e2e_ms = benchmark_flash(
+                n_heads=n_heads, 
+                seq_len=seq_len, 
+                d_model=dmodel, 
+                dtype=dtype, 
+                attn_fn=atten_fn,
+                warmups=warmups,
+                trials=trails
+            )
+            res_entry["Forward (ms)"] = f"{fwd_ms:.2f}"
+            res_entry["Backward (ms)"] = f"{bwd_ms:.2f}"
+            res_entry["End-to-End (ms)"] = f"{e2e_ms:.2f}"
+            
+        except Exception as e:
+            error_msg = "Error"
+            logger.error(f"Failed at d={dmodel}, l={seq_len}: {e}")
+            res_entry["Forward (ms)"] = error_msg
+            res_entry["Backward (ms)"] = error_msg
+            res_entry["End-to-End (ms)"] = error_msg
+        finally:
+            results_list.append(res_entry)
+
+    df = pd.DataFrame(results_list)
+    
+    print("\n" + "="*80)
+    print(f" 📊 FlashAttention Benchmark Results")
+    print("="*80 + "\n")
+    
+    print(df.to_markdown(index=False))
+    print("\n" + "="*80)
 
 if __name__ == "__main__":
     app()

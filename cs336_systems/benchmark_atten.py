@@ -1,4 +1,5 @@
 import torch
+import triton
 import timeit
 import statistics
 import logging
@@ -96,3 +97,45 @@ class AttentionBenchmarker:
             torch.cuda.empty_cache()
             logger.warning("CUDA Out of Memory Error encountered!")
             return {"oom": True}
+        
+
+def benchmark_flash(n_heads, seq_len, d_model, dtype, attn_fn, is_causal=True, warmups=25, trials=100):
+    q, k, v = [
+        torch.randn(1, n_heads, seq_len, d_model, device='cuda', dtype=dtype, requires_grad=True)
+        for _ in range(3)
+    ]
+
+    # 1. Forward
+    fwd_ms = triton.testing.do_bench(
+        lambda: attn_fn(q, k, v, is_causal), 
+        warmup=warmups, 
+        rep=trials
+    )
+
+    # 2. Backward
+    o = attn_fn(q, k, v, is_causal)
+    loss = o.sum()
+    def bwd_pass():
+        q.grad = k.grad = v.grad = None
+        loss.backward(retain_graph=True)
+        
+    bwd_ms = triton.testing.do_bench(
+        bwd_pass, 
+        warmup=warmups, 
+        rep=trials
+    )
+
+    # 3. Forward + Backward(end-to-end)
+    def full_pass():
+        q.grad = k.grad = v.grad = None
+        out = attn_fn(q, k, v, is_causal)
+        loss = out.sum()
+        loss.backward()
+        
+    e2e_ms = triton.testing.do_bench(
+        full_pass, 
+        warmup=warmups, 
+        rep=trials
+    )
+
+    return fwd_ms, bwd_ms, e2e_ms

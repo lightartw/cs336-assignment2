@@ -53,10 +53,20 @@ class FlashAttention2Pytorch(torch.autograd.Function):
             for j in range(T_k):
                 start_j = j * B_k
                 end_j = min((j + 1) * B_k, N_k)
+
+                if is_causal and start_j >= end_i:
+                    break
+
                 K_j = K[..., start_j:end_j, :]
                 V_j = V[..., start_j:end_j, :]
 
                 S_ij = Q_i @ K_j.transpose(-2, -1) / math.sqrt(d)    
+                if is_causal and end_j > start_i:
+                    offset_q = torch.arange(start_i, end_i, device=Q.device).view(-1, -1)
+                    offset_k = torch.arange(start_j, end_j, device=Q.device).view(1, -1)
+                    casual_mask = offset_q >= offset_k
+                    S_ij = S_ij.where(casual_mask, S_ij, -1e6)
+
                 m_i_new = torch.maximum(m_i, torch.max(S_ij, dim=-1).values)        
                 P_ij = torch.exp(S_ij - m_i_new.unsqueeze(-1))
 
@@ -74,13 +84,37 @@ class FlashAttention2Pytorch(torch.autograd.Function):
             L[..., start_i:end_i] = L_i
 
         ctx.save_for_backward(L, Q, K, V, O)
+        ctx.is_causal = is_causal
         return O
     
     @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError
-    
+    def backward(ctx, grad_output: torch.Tensor):
+        L, Q, K, V, O = ctx.saved_tensors
+        L: torch.Tensor
+        Q: torch.Tensor
+        K: torch.Tensor
+        V: torch.Tensor
+        O: torch.Tensor 
+        is_causal = ctx.is_causal
 
+        # recompute
+        d = Q.shape[-1]
+        scale = 1.0 / math.sqrt(d)
+        D = (O * grad_output).sum(dim=-1, keepdim=True)
+
+        S = Q @ K.transpose(-2, -1) * scale
+        P = torch.exp(S - L.unsqueeze(-1))
+        if is_causal:
+            P = torch.tril(P)
+
+        # grad
+        grad_V = P.transpose(-2, -1) @ grad_output
+        grad_P = grad_output @ V.transpose(-2, -1)
+        grad_S = P * (grad_P - D)
+        grad_Q = (grad_S @ K) * scale
+        grad_K = (grad_S.transpose(-2, -1) @ Q) * scale      
+        return grad_Q, grad_K, grad_V, None
+    
 @triton.jit
 def flash_fwd_kernel(
     Q_ptr, K_ptr, V_ptr,
@@ -178,6 +212,23 @@ def flash_fwd_kernel(
     mask_q = offset_q < N_QUERIES
     tl.store(L_ptrs, L_i.to(L_ptr.dtype.element_ty), mask=mask_q)
 
+@torch.compile
+def _backword_compile(grad_output, Q, K, V, O, L, is_causal, scale):
+    D = (O * grad_output).sum(dim=-1, keepdim=True)
+    S = Q @ K.transpose(-2, -1) * scale
+    P = torch.exp(S - L.unsqueeze(-1))
+    
+    if is_causal:
+        P = torch.tril(P)
+
+    grad_V = P.transpose(-2, -1) @ grad_output
+    grad_P = grad_output @ V.transpose(-2, -1)
+    grad_S = P * (grad_P - D)
+    grad_Q = (grad_S @ K) * scale
+    grad_K = (grad_S.transpose(-2, -1) @ Q) * scale
+    
+    return grad_Q, grad_K, grad_V
+
 
 class FlashAttention2Triton(torch.autograd.Function):
     @staticmethod
@@ -229,5 +280,11 @@ class FlashAttention2Triton(torch.autograd.Function):
         return O
     
     @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError
+    def backward(ctx, grad_output: torch.Tensor):
+        L, Q, K, V, O = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        d = Q.shape[-1]
+        scale = 1.0 / math.sqrt(d)
+        
+        grad_Q, grad_K, grad_V = _backword_compile(grad_output, Q, K, V, O, L, is_causal, scale)
+        return grad_Q, grad_K, grad_V, None
