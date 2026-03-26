@@ -8,7 +8,7 @@ import typer
 import json
 import pandas as pd
 
-from cs336_systems.benchmark import ModelBenchmarker
+from cs336_systems.benchmark_model import ModelBenchmarker
 from cs336_systems.config import Config
 
 app = typer.Typer(help="CS336 Benchmarking", add_completion=False)
@@ -198,7 +198,7 @@ def bench_atten(
     is_compile: bool = typer.Option(False, "--is-compile", help="是否使用 torch.compile"),
 ):
     import itertools
-    from cs336_systems.benchmark import AttentionBenchmarker
+    from cs336_systems.benchmark_atten import AttentionBenchmarker
     from cs336_basics.model import scaled_dot_product_attention
 
     atten_fn = scaled_dot_product_attention
