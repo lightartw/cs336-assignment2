@@ -375,3 +375,48 @@ total:
 |       128 |      4096 |          70.71 |          690.58 |           1593.33 |
 
 # 3.Distributed Data Parallel Training
+
+- distributed_communication_single_node
+
+| Device   |   World Size | Data Size   |   Avg Time (s) |
+|:---------|-------------:|:------------|---------------:|
+| CPU      |            2 | 1MB         |       0.000464 |
+| CPU      |            2 | 10MB        |       0.002807 |
+| CPU      |            2 | 100MB       |       0.028007 |
+| CPU      |            2 | 1GB         |       0.284217 |
+| CPU      |            4 | 1MB         |       0.001046 |
+| CPU      |            4 | 10MB        |       0.004889 |
+| CPU      |            4 | 100MB       |       0.050327 |
+| CPU      |            4 | 1GB         |       0.500881 |
+| CPU      |            6 | 1MB         |       0.002371 |
+| CPU      |            6 | 10MB        |       0.006956 |
+| CPU      |            6 | 100MB       |       0.079248 |
+| CPU      |            6 | 1GB         |       0.715771 |
+
+- naive ddp benchmarking
+
+基础配置如下，使用cpu：
+
+```json
+model={
+    "vocab_size": 100,
+    "context_length": 16,
+    "d_model": 64,
+    "num_layers": 2,
+    "num_heads": 2,
+    "d_ff": 256,
+    "rope_theta": 10000.0
+},
+training={
+    "precision": "fp32",
+}
+```
+
+- 结果如下，可见通信有固定开销：
+
+|   World Size |   Batch Size |   Avg Step Time (s) |   Avg Comm Time (s) | Comm Proportion   |
+|-------------:|-------------:|--------------------:|--------------------:|:------------------|
+|            2 |           16 |              0.0297 |              0.0166 | 55.71%            |
+|            2 |           32 |              0.0336 |              0.016  | 47.64%            |
+|            2 |           64 |              0.0331 |              0.0156 | 47.16%            |
+|            2 |          128 |              0.061  |              0.0163 | 26.67%            |
