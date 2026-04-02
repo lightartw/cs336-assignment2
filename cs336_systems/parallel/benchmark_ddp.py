@@ -28,13 +28,24 @@ def setup(rank, world_size, use_gpu):
 
     if use_gpu and torch.cuda.is_available():
         backend = "nccl"
+        torch.cuda.set_device(rank) 
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        
+        dist.init_process_group(
+            backend=backend, 
+            rank=rank, 
+            world_size=world_size,
+            device_id=device, 
+        )
     else:
         backend = "gloo"
         device = torch.device("cpu")
+        dist.init_process_group(
+            backend=backend, 
+            rank=rank, 
+            world_size=world_size
+        )
         
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
     return device
 
 def get_model(config: Config, ddptype: DDPType, device, bucket_size_mb: float | None=None):
