@@ -117,7 +117,7 @@ def bench_optimizer(rank, world_size, config: Config, results, use_shared_optim=
         
         # start bench optim
         if step == 0:
-            if device.type == 'cuda' and step == num_warmup:
+            if device.type == 'cuda':
                 mem_before_optim = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
             else:
                 mem_before_optim = get_cpu_memory_mb()
