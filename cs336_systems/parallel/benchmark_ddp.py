@@ -22,11 +22,10 @@ class DDPType(str, Enum):
     BUCKETED = "bucketed_ddp"     
 
 
-def setup(rank, world_size):
+def setup(rank, world_size, use_gpu):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29500"
 
-    use_gpu = False
     if use_gpu and torch.cuda.is_available():
         backend = "nccl"
         device = torch.device(f"cuda:{rank}")
@@ -86,9 +85,10 @@ def communicate(model: torch.nn.Module, world_size, ddptype: DDPType):
 
 
 def bench_ddp(rank, world_size, config: Config, results, ddptype: DDPType, bucket_size_mb: float | None=None):
-    device = setup(rank, world_size)
     mc = config.model
     tc = config.training
+    use_gpu = tc.device == "cuda"
+    device = setup(rank, world_size, use_gpu)
     dist.barrier()
 
     # init model

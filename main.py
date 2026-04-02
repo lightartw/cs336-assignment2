@@ -1,15 +1,17 @@
 import os
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import re
 import glob
 import torch 
 import typer
 import json
 import pandas as pd
+import torch.multiprocessing as mp
 
 from cs336_systems.benchmark_model import ModelBenchmarker
 from cs336_systems.config import Config
+from cs336_systems.parallel.benchmark_ddp import DDPType
 
 app = typer.Typer(help="CS336 Benchmarking", add_completion=False)
 
@@ -347,6 +349,116 @@ def bench_flash(
     
     print(df.to_markdown(index=False))
     print("\n" + "="*80)
+
+@app.command(name="bench-ddp")
+def bench_ddp(
+    world_size: int = typer.Option(2, help="使用的 GPU/进程数量"),
+    ddp_type: DDPType = typer.Option(DDPType.INDIVIDUAL, help="DDP 类型选择"),
+    bucket_size_mb: Optional[float] = typer.Option(None, help="分桶大小(MB)，仅对 bucketed_ddp 有效"),
+    batch_size: int = typer.Option(64, help="测试的 batch size"),
+    precision: str = typer.Option("fp32", help="训练精度: fp32, bf16 等"),
+    device: str = typer.Option("cuda", help="运行设备: 'cuda' 或 'cpu'"),
+    vocab_size: int = typer.Option(200),
+    context_length: int = typer.Option(16),
+    d_model: int = typer.Option(64),
+    num_layers: int = typer.Option(4),
+    num_heads: int = typer.Option(2),
+    d_ff: int = typer.Option(256),
+    rope_theta: float = typer.Option(10000.0),
+):
+    
+    from cs336_systems.parallel.benchmark_ddp import DDPType, bench_ddp
+
+    manager = mp.Manager()
+    results = manager.list()
+    
+    print(f"\n--- Starting DDP Benchmark [{ddp_type.value}] | World Size: {world_size} | Device: {device} | BS: {batch_size} ---")
+    
+    config = Config(
+        model={
+            "vocab_size": vocab_size,
+            "context_length": context_length,
+            "d_model": d_model,
+            "num_layers": num_layers,
+            "num_heads": num_heads,
+            "d_ff": d_ff,
+            "rope_theta": rope_theta
+        },
+        training={
+            "batch_size": batch_size, 
+            "precision": precision,
+            "device": device, 
+            "is_compile": False
+        }
+    )
+    
+    mp.spawn(
+        fn=bench_ddp, 
+        args=(world_size, config, results, ddp_type, bucket_size_mb), 
+        nprocs=world_size, 
+        join=True
+    )
+    
+    df = pd.DataFrame(list(results))
+    print("\n" + "="*80)
+    print(f" 📊 DDP Benchmark Results ({ddp_type.value})")
+    print("="*80 + "\n")
+    print(df.to_markdown(index=False))
+
+@app.command(name="bench-optim")
+def benchmark_optim_cmd(
+    use_shared_optim: bool = typer.Option(True, help="是否使用 Shared Optimizer (Zero Redundancy)"),
+    world_size: int = typer.Option(2, help="使用的 GPU/进程数量"),
+    batch_size: int = typer.Option(64, help="测试的 batch size"),
+    precision: str = typer.Option("fp32", help="训练精度: fp32, bf16 等"),
+    device: str = typer.Option("cuda", help="运行设备: 'cuda' 或 'cpu'"),
+    
+    vocab_size: int = typer.Option(200),
+    context_length: int = typer.Option(16),
+    d_model: int = typer.Option(64),
+    num_layers: int = typer.Option(4),
+    num_heads: int = typer.Option(2),
+    d_ff: int = typer.Option(256),
+    rope_theta: float = typer.Option(10000.0),
+):
+    from cs336_systems.parallel.benchmark_optimizer import bench_optimizer
+
+    manager = mp.Manager()
+    results = manager.list()
+    
+    optim_status = "Shared" if use_shared_optim else "Standard"
+    print(f"\n--- Starting Optim Benchmark [{optim_status}] | World Size: {world_size} | Device: {device} | BS: {batch_size} ---")
+    
+    config = Config(
+        model={
+            "vocab_size": vocab_size,
+            "context_length": context_length,
+            "d_model": d_model,
+            "num_layers": num_layers,
+            "num_heads": num_heads,
+            "d_ff": d_ff,
+            "rope_theta": rope_theta
+        },
+        training={
+            "batch_size": batch_size, 
+            "precision": precision,
+            "device": device, 
+            "is_compile": False
+        }
+    )
+    
+    mp.spawn(
+        fn=bench_optimizer, 
+        args=(world_size, config, results, use_shared_optim), 
+        nprocs=world_size, 
+        join=True
+    )
+    
+    df = pd.DataFrame(list(results))
+    print("\n" + "="*80)
+    print(f" 📊 Optim Benchmark Results (Shared: {use_shared_optim})")
+    print("="*80 + "\n")
+    print(df.to_markdown(index=False))
 
 if __name__ == "__main__":
     app()
