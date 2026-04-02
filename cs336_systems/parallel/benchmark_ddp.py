@@ -16,7 +16,7 @@ from cs336_systems.parallel.bucket_ddp import bucket_ddp
 
 
 class DDPType(str, Enum):
-    NAIVE = "base_ddp"       
+    NAIVE = "navie_ddp"       
     FLAT = "flat_ddp"       
     INDIVIDUAL = "individual_ddp" 
     BUCKETED = "bucketed_ddp"     

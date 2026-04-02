@@ -399,10 +399,10 @@ total:
 
 ```json
 model={
-    "vocab_size": 100,
+    "vocab_size": 200,
     "context_length": 16,
     "d_model": 64,
-    "num_layers": 2,
+    "num_layers": 4,
     "num_heads": 2,
     "d_ff": 256,
     "rope_theta": 10000.0
@@ -411,12 +411,76 @@ training={
     "precision": "fp32",
 }
 ```
-
-- 结果如下，可见通信有固定开销：
+结果如下，可见通信有固定开销：
 
 |   World Size |   Batch Size |   Avg Step Time (s) |   Avg Comm Time (s) | Comm Proportion   |
 |-------------:|-------------:|--------------------:|--------------------:|:------------------|
-|            2 |           16 |              0.0297 |              0.0166 | 55.71%            |
-|            2 |           32 |              0.0336 |              0.016  | 47.64%            |
-|            2 |           64 |              0.0331 |              0.0156 | 47.16%            |
-|            2 |          128 |              0.061  |              0.0163 | 26.67%            |
+|            2 |           16 |              0.0563 |              0.0227 | 40.33%            |
+|            2 |           32 |              0.0501 |              0.0206 | 41.01%            |
+|            2 |           64 |              0.052  |              0.0197 | 37.90%            |
+|            2 |          128 |              0.0604 |              0.021  | 34.79%            |
+
+- ddp flat benchmarking
+
+|   World Size |   Batch Size |   Avg Step Time (s) |   Avg Comm Time (s) | Comm Proportion   |
+|-------------:|-------------:|--------------------:|--------------------:|:------------------|
+|            2 |           16 |              0.0414 |              0.0069 | 16.75%            |
+|            2 |           32 |              0.0329 |              0.0072 | 21.97%            |
+|            2 |           64 |              0.0489 |              0.0057 | 11.58%            |
+|            2 |          128 |              0.0557 |              0.0068 | 12.27%            |
+
+- benchmark individual ddp
+
+|   World Size |   Batch Size |   Avg Step Time (s) |   Avg Comm Time (s) | Comm Proportion   |
+|-------------:|-------------:|--------------------:|--------------------:|:------------------|
+|            2 |           16 |              0.0381 |              0.0139 | 36.37%            |
+|            2 |           32 |              0.0417 |              0.0139 | 33.30%            |
+|            2 |           64 |              0.0516 |              0.0133 | 25.68%            |
+|            2 |          128 |              0.0596 |              0.0141 | 23.59%            |
+
+- bucket ddp:batch_size设置为了 64
+- (a) 因为在 cpu 上测试，所以结果参考性有限，可以看到通信时间相对减少许多，大部分在 backward 阶段
+
+|   World Size |   Bucket Size (MB) |   Avg Step Time (s) |   Avg Comm Time (s) | Comm Proportion   |
+|-------------:|-------------------:|--------------------:|--------------------:|:------------------|
+|            2 |                  1 |              0.1444 |              0.0095 | 6.57%             |
+|            2 |                 10 |              0.0993 |              0.0079 | 7.92%             |
+|            2 |                100 |              0.0776 |              0.0085 | 10.95%            |
+|            2 |               1000 |              0.1125 |              0.0083 | 7.39%             |
+
+- (b) equation
+    - 单个桶通信耗时：$T_{comm} = \frac{s}{n_b \cdot w} + o$
+    - 单个桶计算耗时：$T_{comp} = \frac{s}{n_b \cdot w}$
+    - 总时间： $$T_{total} = T_{comp} + n_b \cdot T_{comm} = \frac{s}{n_b \cdot w} + n_b \cdot \left( \frac{s}{n_b \cdot w} + o \right)$$
+
+    - 通信总开销：$Overhead = T_{total} - \frac{s}{w}= \frac{s}{n_b \cdot w} + n_b \cdot o$
+
+    - 最优桶大小：将 $n_b=\frac{s}{b}$ 代入 $Overhead$，得到：$$\text{Overhead}(b) = \frac{b}{w} + \frac{s \cdot o}{b}$$
+    - 求导得最优桶大小：$b = \sqrt{s \cdot w \cdot o}$
+
+- communication_accounting:
+    - 假设输入形状：[batch_size, seq_len, d_model] (b, s, d_model)
+- (a) 
+    - 每blcok参数数量：$param_per_block = 2 * d_{ff} * d_{model}$
+    - memory of weights: $M_w = 4 * num_blocks * param_perblock$
+    - accumulated gradients: 同 $M_w$
+    - optimizer states: 当使用 AdamW 时，为 $2 * M_w$
+    - activation(bf16): $2 * num_blocks * b * s * (d_{model} + d_{ff})$ 
+    - 计算得到参数，梯度，优化器状态占用内存：3276GB; 激活值占用内存：$16.7b*s$ MB
+    - 不考虑激活值，需要 H100 数量：41 个
+- (b)
+    - 共享的内存：$17547264*b*s + 3517578215424 (bytes)$
+    - 忽略激活值，需要的设备数为：$N_{FSDP}=35$
+- (c)
+    - 假设单设备的批次大小和序列长度分别为：$b, s$，即单设备处理token总数为 $b·s$
+    - 计算时间：$$t_{comp} = \frac{2 \cdot 2 \cdot (b \cdot s) \cdot d_{model} \cdot d_{ff}}{Y \cdot C} = \frac{4 \cdot (b \cdot s) \cdot d_{model} \cdot d_{ff}}{Y \cdot C}$$
+    - FSDP通信：$$t_{comm, FSDP} = \frac{4 \cdot d_{model} \cdot d_{ff}}{Y \cdot M_X \cdot W_{ici}}$$
+    - TP通信：$$t_{comm, TP} = \frac{2 \cdot 2 \cdot (b \cdot s) \cdot d_{model}}{M_Y \cdot W_{ici}} = \frac{4 \cdot (b \cdot s) \cdot d_{model}}{M_Y \cdot W_{ici}}$$
+    - 求解 compute bound，必须满足：$t_{comp} \ge t_{comm, FSDP}$ 且 $t_{comp} \ge t_{comm, TP}$
+    - 化简得到TP限制（已符合）：$$d_{ff} \ge \frac{Y \cdot C}{M_Y \cdot W_{ici}}$$
+    - FSDP限制：$$(b \cdot s) \ge \frac{C}{M_X \cdot W_{ici}} \approx 7931.03$$
+    - 故全局 batch size 约为： $B_{overall}=(b·s)·X \approx 126896$
+- (d) 引入 pipeline parallelism，降低通信精度等
+
+
+# 4.Optimizer State Sharding
