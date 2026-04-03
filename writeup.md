@@ -461,11 +461,11 @@ training={
 - communication_accounting:
     - 假设输入形状：[batch_size, seq_len, d_model] (b, s, d_model)
 - (a) 
-    - 每blcok参数数量：$param_per_block = 2 * d_{ff} * d_{model}$
-    - memory of weights: $M_w = 4 * num_blocks * param_perblock$
+    - 每blcok参数数量：$param\_perblock = 2 * d_{ff} * d_{model}$
+    - memory of weights: $M_w = 4 * num\_blocks * param\_perblock$
     - accumulated gradients: 同 $M_w$
     - optimizer states: 当使用 AdamW 时，为 $2 * M_w$
-    - activation(bf16): $2 * num_blocks * b * s * (d_{model} + d_{ff})$ 
+    - activation(bf16): $2 * num\_blocks * b * s * (d_{model} + d_{ff})$ 
     - 计算得到参数，梯度，优化器状态占用内存：3276GB; 激活值占用内存：$16.7b*s$ MB
     - 不考虑激活值，需要 H100 数量：41 个
 - (b)
@@ -484,25 +484,28 @@ training={
 
 
 # 4.Optimizer State Sharding
+
+- GPU: $T4 \times 2$
 - world size 默认为 2
 
 - 一般情况
 
 |   Batch Size |   Avg Total Step Time (s) |   Avg Optim Step Time (s) |   Mem After Init (MB) |   Mem Before Optim (MB) |   Mem After Optim (MB) |
 |-------------:|--------------------------:|--------------------------:|----------------------:|------------------------:|-----------------------:|
-|           16 |                    0.8429 |                    0.2535 |                1616.2 |                 3298.41 |                1414.84 |
-|           32 |                    0.9463 |                    0.2529 |                1616.2 |                 3308.65 |                1393.75 |
-|           64 |                    1.2639 |                    0.2521 |                1616.2 |                 4777.45 |                 1417.4 |
-|          128 |                    2.2418 |                    0.2508 |                1616.2 |                 7922.68 |                1406.36 |
+|           16 |                    0.8499 |                    0.2539 |                1616.2 |                 3298.41 |                6690.79 |
+|           32 |                    0.9362 |                    0.2534 |                1616.2 |                 3308.65 |                6701.03 |
+|           64 |                    1.2176 |                    0.2528 |                1616.2 |                 4777.45 |                6721.04 |
+|          128 |                    2.1279 |                    0.2516 |                1616.2 |                 7922.68 |                7922.68 |
+
 
 - 开启 state sharing 的情况
 
-|   World Size |   Batch Size |   Avg Total Step Time (s) |   Avg Optim Step Time (s) |   Mem After Init (MB) |   Mem Before Optim (MB) |   Mem After Optim (MB) |
-|-------------:|-------------:|--------------------------:|--------------------------:|----------------------:|------------------------:|-----------------------:|
-|            2 |           16 |                    0.9132 |                    0.3204 |                1616.2 |                 3298.41 |                 1395.2 |
-|            2 |           32 |                    1.0423 |                    0.3202 |                1616.2 |                 3308.65 |                1416.43 |
-|            2 |           64 |                    1.4122 |                    0.3195 |                1616.2 |                 4777.45 |                1397.43 |
-|            2 |          128 |                    2.2735 |                    0.3199 |                1616.2 |                 7922.68 |                1397.53 |
+|   Batch Size |   Avg Total Step Time (s) |   Avg Optim Step Time (s) |   Mem After Init (MB) |   Mem Before Optim (MB) |   Mem After Optim (MB) |
+|-------------:|--------------------------:|--------------------------:|----------------------:|------------------------:|-----------------------:|
+|           16 |                    0.9185 |                    0.3218 |                1616.2 |                 3298.41 |                 5154.6 |
+|           32 |                     1.049 |                    0.3214 |                1616.2 |                 3308.65 |                5164.84 |
+|           64 |                    1.4131 |                    0.3212 |                1616.2 |                 4777.45 |                5184.84 |
+|          128 |                    2.2861 |                    0.3203 |                1616.2 |                 7922.68 |                7922.68 |
 
 
 # 补充
